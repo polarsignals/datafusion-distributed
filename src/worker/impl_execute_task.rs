@@ -1,4 +1,4 @@
-use crate::common::{TreeNodeExt, now_ns, on_drop_stream};
+use crate::common::{now_ns, on_drop_stream, TreeNodeExt};
 use crate::metrics::proto::df_metrics_set_to_proto;
 use crate::protobuf::datafusion_error_to_tonic_status;
 use crate::worker::generated::worker::{FlightAppMetadata, TaskMetrics};
@@ -9,24 +9,24 @@ use arrow_flight::error::FlightError;
 use arrow_select::dictionary::garbage_collect_any_dictionary;
 use datafusion::arrow::array::{Array, AsArray, RecordBatch, RecordBatchOptions};
 use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::common::{Result, exec_err, internal_err};
+use datafusion::common::{exec_err, internal_err, Result};
 
-use crate::worker::generated::worker::ExecuteTaskRequest;
 use crate::worker::generated::worker::worker_service_server::WorkerService;
+use crate::worker::generated::worker::ExecuteTaskRequest;
 use crate::worker::spawn_select_all::spawn_select_all;
 use crate::worker::task_data::TaskDataMetrics;
-use datafusion::arrow::ipc::CompressionType;
 use datafusion::arrow::ipc::writer::IpcWriteOptions;
+use datafusion::arrow::ipc::CompressionType;
 use datafusion::common::exec_datafusion_err;
 use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::ExecutionPlan;
 use futures::TryStreamExt;
 use prost::Message;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::oneshot::Sender;
 use tokio_stream::StreamExt;
@@ -174,21 +174,27 @@ fn build_flight_data_stream(
     stream: SendableRecordBatchStream,
     compression_type: Option<CompressionType>,
 ) -> Result<FlightDataEncoder, Status> {
+    // Arrow IPC cannot represent dictionary-of-dictionary columns, so flatten
+    // any nested dictionaries to a single level before encoding. The declared
+    // (nested) shape is restored on the receiving side at each network boundary.
+    // `flatten_schema` returns None when there is nothing nested to flatten.
+    let orig_schema = stream.schema();
+    let flat_schema = crate::flatten_dict::flatten_schema(&orig_schema);
+    let send_schema = flat_schema.clone().unwrap_or(orig_schema);
+
     let stream = FlightDataEncoderBuilder::new()
         .with_options(
             IpcWriteOptions::default()
                 .try_with_compression(compression_type)
                 .map_err(|err| Status::internal(err.to_string()))?,
         )
-        .with_schema(stream.schema())
-        // This tells the encoder to send dictionaries across the wire as-is.
-        // The alternative (`DictionaryHandling::Hydrate`) would expand the dictionaries
-        // into their value types, which can potentially blow up the size of the data transfer.
-        // The main reason to use `DictionaryHandling::Hydrate` is for compatibility with clients
-        // that do not support dictionaries, but since we are using the same server/client on both
-        // sides, we can safely use `DictionaryHandling::Resend`.
-        // Note that we do garbage collection of unused dictionary values above, so we are not sending
-        // unused dictionary values over the wire.
+        .with_schema(send_schema)
+        // Send dictionaries across the wire as-is. The alternative
+        // (`DictionaryHandling::Hydrate`) expands dictionaries into their value
+        // types, which breaks the plan's declared dictionary-encoded schema and
+        // can blow up transfer size. Since the same server/client run on both
+        // sides, `Resend` is correct; nested dictionaries are handled by the
+        // flatten/restore above rather than by expansion.
         .with_dictionary_handling(DictionaryHandling::Resend)
         // Set max flight data size to unlimited.
         // This requires servers and clients to also be configured to handle unlimited sizes.
@@ -201,8 +207,15 @@ fn build_flight_data_stream(
         .with_max_flight_data_size(usize::MAX)
         .build(
             stream
-                // Apply garbage collection of dictionary and view arrays before sending over the network
-                .and_then(|rb| std::future::ready(garbage_collect_arrays(rb)))
+                // Flatten nested dictionaries to match `send_schema`, then GC
+                // dictionary/view arrays before sending over the network.
+                .and_then(move |rb| {
+                    std::future::ready(match flat_schema.as_ref() {
+                        Some(fs) => crate::flatten_dict::cast_batch_to_schema(rb, fs)
+                            .and_then(garbage_collect_arrays),
+                        None => garbage_collect_arrays(rb),
+                    })
+                })
                 .map_err(|err| FlightError::Tonic(Box::new(datafusion_error_to_tonic_status(err)))),
         );
     Ok(stream)

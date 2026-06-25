@@ -1,18 +1,17 @@
-use crate::DistributedTaskContext;
 use crate::common::require_one_child;
 use crate::distributed_planner::{NetworkBoundary, ProducerHead};
 use crate::execution_plans::common::scale_partitioning_props;
 use crate::stage::{LocalStage, Stage};
 use crate::worker::WorkerConnectionPool;
+use crate::DistributedTaskContext;
 use datafusion::common::{exec_err, not_impl_err, plan_err};
 use datafusion::error::Result;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr_common::metrics::MetricsSet;
 use datafusion::physical_plan::limit::LocalLimitExec;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, EmptyRecordBatchStream, ExecutionPlan, PlanProperties,
-    internal_err,
+    internal_err, DisplayAs, DisplayFormatType, EmptyRecordBatchStream, ExecutionPlan,
+    PlanProperties,
 };
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -302,10 +301,10 @@ impl ExecutionPlan for NetworkCoalesceExec {
 
         let stream = worker_connection.execute(target_partition)?;
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.schema(),
+        Ok(crate::flatten_dict::restore_record_batch_stream(
             stream,
-        )))
+            self.schema(),
+        ))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {

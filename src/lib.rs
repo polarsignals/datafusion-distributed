@@ -2,6 +2,7 @@
 
 mod common;
 mod config_extension_ext;
+mod flatten_dict;
 mod distributed_ext;
 mod execution_plans;
 mod metrics;

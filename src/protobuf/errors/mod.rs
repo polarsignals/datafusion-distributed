@@ -20,10 +20,11 @@ mod schema_error;
 /// to be sent over the wire and decoded by the receiving end, recovering the original
 /// [DataFusionError] across a network boundary with [tonic_status_to_datafusion_error].
 pub fn datafusion_error_to_tonic_status(err: impl Borrow<DataFusionError>) -> tonic::Status {
-    let err = DataFusionErrorProto::from_datafusion_error(err.borrow());
-    let err = err.encode_to_vec();
+    let df_err = err.borrow();
+    let proto = DataFusionErrorProto::from_datafusion_error(df_err);
+    let proto = proto.encode_to_vec();
 
-    tonic::Status::with_details(tonic::Code::Internal, "DataFusionError", err.into())
+    tonic::Status::with_details(tonic::Code::Internal, "DataFusionError", proto.into())
 }
 
 /// Decodes a [DataFusionError] from a [tonic::Status] error. If the provided [tonic::Status]

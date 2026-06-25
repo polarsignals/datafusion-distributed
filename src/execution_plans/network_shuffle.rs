@@ -4,13 +4,12 @@ use crate::execution_plans::common::scale_partitioning;
 use crate::stage::{LocalStage, Stage};
 use crate::worker::WorkerConnectionPool;
 use crate::{DistributedTaskContext, NetworkBoundary};
-use datafusion::common::{Result, not_impl_err, plan_err};
+use datafusion::common::{not_impl_err, plan_err, Result};
 use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_expr_common::metrics::MetricsSet;
 use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use std::fmt::Formatter;
 use std::sync::Arc;
@@ -233,10 +232,10 @@ impl ExecutionPlan for NetworkShuffleExec {
             streams.push(stream);
         }
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.schema(),
+        Ok(crate::flatten_dict::restore_record_batch_stream(
             futures::stream::select_all(streams),
-        )))
+            self.schema(),
+        ))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
