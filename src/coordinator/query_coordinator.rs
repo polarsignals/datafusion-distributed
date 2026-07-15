@@ -465,3 +465,75 @@ impl CoordinatorToWorkerMetrics {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for a rustc miscompilation (present at least through
+    /// 1.96, fixed in 1.98) of [`CoordinatorToWorkerMetrics::new`].
+    ///
+    /// When the per-metric label builder was passed to [`LatencyMetric::new`]
+    /// as a closure (`|b| b.with_label(..)`) and the crate was compiled in
+    /// release mode with `panic = "abort"` at opt-level >= 2, the compiler
+    /// reused the first `MetricBuilder`'s freshly-emptied labels `Vec` header
+    /// on the second, back-to-back invocation. The `_avg` latency metric's
+    /// labels vec then aliased the `_max` metric's heap buffer (pushing into
+    /// it at index 1 without allocating), so two live [`Metric`]s owned one
+    /// buffer and metrics teardown double-freed / read freed memory — a
+    /// use-after-free that only reproduced in optimized abort builds. Passing
+    /// the builder as a named `fn` ([`with_task_id_label`]) sidesteps it.
+    ///
+    /// `CoordinatorToWorkerMetrics::new` registers three labeled metrics —
+    /// `plan_bytes_sent` and the latency `_max`/`_avg` pair — each of which
+    /// must own a distinct heap buffer holding exactly its single `task_id`
+    /// label. The miscompile is observable as the `_avg` buffer aliasing the
+    /// `_max` buffer with length 2.
+    ///
+    /// NOTE: the miscompile only manifests in `--release` builds compiled with
+    /// `panic = "abort"`; a default debug `cargo test` run passes on affected
+    /// and fixed toolchains alike. This test therefore guards the invariant
+    /// and documents the required builder shape; to exercise the miscompile
+    /// itself, build the reproducing configuration.
+    #[test]
+    fn coordinator_metrics_have_distinct_label_buffers() {
+        // The exact codegen depends on the surrounding inlining context, so
+        // repeat rather than trusting a single construction.
+        for iteration in 0..10_000 {
+            let metrics = ExecutionPlanMetricsSet::new();
+            let _coordinator = CoordinatorToWorkerMetrics::new(&metrics);
+
+            let set = metrics.clone_inner();
+            let labeled: Vec<(usize, usize)> = set
+                .iter()
+                .filter(|metric| !metric.labels().is_empty())
+                .map(|metric| (metric.labels().as_ptr() as usize, metric.labels().len()))
+                .collect();
+
+            assert_eq!(
+                labeled.len(),
+                3,
+                "iteration {iteration}: expected 3 labeled metrics \
+                 (plan_bytes_sent, plan_send_latency_max, plan_send_latency_avg), \
+                 got {labeled:x?}"
+            );
+
+            for (ptr, len) in &labeled {
+                assert_eq!(
+                    *len, 1,
+                    "iteration {iteration}: labeled metric at {ptr:#x} carries {len} labels, \
+                     expected 1 — label-buffer aliasing miscompilation"
+                );
+            }
+
+            let mut ptrs: Vec<usize> = labeled.iter().map(|(ptr, _)| *ptr).collect();
+            ptrs.sort_unstable();
+            let distinct = ptrs.windows(2).all(|w| w[0] != w[1]);
+            assert!(
+                distinct,
+                "iteration {iteration}: labeled metrics share a label buffer: {labeled:x?} \
+                 — rustc metric-builder miscompilation (use a named fn, not a closure)"
+            );
+        }
+    }
+}
