@@ -448,6 +448,13 @@ pub(super) struct CoordinatorToWorkerMetrics {
     pub(super) instantiation_time: usize,
 }
 
+// Use a helper function instead of a closure due to a panic in the rustc compiler where it
+// would incorrectly allocate memory for the metrics that reuses the same buffer across calls to builder.
+// This is fixed in rustc 1.98
+fn with_task_id_label(builder: MetricBuilder) -> MetricBuilder {
+    builder.with_label(Label::new(DISTRIBUTED_DATAFUSION_TASK_ID_LABEL, "0"))
+}
+
 impl CoordinatorToWorkerMetrics {
     pub(super) fn new(metrics: &ExecutionPlanMetricsSet) -> Self {
         Self {
@@ -458,7 +465,7 @@ impl CoordinatorToWorkerMetrics {
             // Latency statistics about the network calls issued to the workers for feeding subplans.
             plan_send_latency: Arc::new(LatencyMetric::new(
                 "plan_send_latency",
-                |b| b.with_label(Label::new(DISTRIBUTED_DATAFUSION_TASK_ID_LABEL, "0")),
+                with_task_id_label,
                 metrics,
             )),
             instantiation_time: now_ns(),
